@@ -685,9 +685,14 @@ impl VideoDecoder {
                         }
                         hardware_frame_seen = true;
                         hw_in_use.store(used_hw.code(), Ordering::Release);
-                        decoder_state.store(DecoderState::HardwareActive.code(), Ordering::Release);
+                        decoder_state
+                            .store(frame_decoder_state(used_hw, true).code(), Ordering::Release);
                         &sw_frame
                     } else {
+                        decoder_state.store(
+                            frame_decoder_state(used_hw, false).code(),
+                            Ordering::Release,
+                        );
                         &decoded_frame
                     };
 
@@ -947,6 +952,16 @@ const fn software_decoder_state(hardware_attempted: bool) -> DecoderState {
     }
 }
 
+const fn frame_decoder_state(selected_backend: HwAccel, hardware_frame: bool) -> DecoderState {
+    if hardware_frame {
+        DecoderState::HardwareActive
+    } else if matches!(selected_backend, HwAccel::Software) {
+        DecoderState::SoftwareActive
+    } else {
+        DecoderState::SoftwareFallback
+    }
+}
+
 /// True when any `/sys/class/drm/card*` sibling reports NVIDIA vendor 0x10de.
 fn nvidia_gpu_present() -> bool {
     any_nvidia_card(std::path::Path::new("/sys/class/drm"))
@@ -1195,6 +1210,22 @@ mod tests {
         );
         assert_eq!(software_decoder_state(true), DecoderState::SoftwareFallback);
         assert_eq!(software_decoder_state(false), DecoderState::SoftwareActive);
+    }
+
+    #[test]
+    fn software_frame_from_hardware_decoder_reports_fallback() {
+        assert_eq!(
+            frame_decoder_state(HwAccel::Nvdec, false),
+            DecoderState::SoftwareFallback
+        );
+        assert_eq!(
+            frame_decoder_state(HwAccel::Nvdec, true),
+            DecoderState::HardwareActive
+        );
+        assert_eq!(
+            frame_decoder_state(HwAccel::Software, false),
+            DecoderState::SoftwareActive
+        );
     }
 
     #[test]
