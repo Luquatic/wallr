@@ -79,16 +79,41 @@ fn main() {
 }
 
 fn print_capabilities() {
-    for (name, backend) in [
-        ("cuda", "cuda"),
-        ("vaapi", "vaapi"),
-        ("videotoolbox", "videotoolbox"),
-    ] {
+    println!(
+        "cuda: {}",
+        if h264_supports_pixel_format(ffmpeg_next::ffi::AVPixelFormat::AV_PIX_FMT_CUDA) {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    for (name, backend) in [("vaapi", "vaapi"), ("videotoolbox", "videotoolbox")] {
         let backend = std::ffi::CString::new(backend).expect("static backend name");
         let available = unsafe {
             ffmpeg_next::ffi::av_hwdevice_find_type_by_name(backend.as_ptr())
                 != ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE
         };
         println!("{name}: {}", if available { "enabled" } else { "disabled" });
+    }
+}
+
+fn h264_supports_pixel_format(pixel_format: ffmpeg_next::ffi::AVPixelFormat) -> bool {
+    unsafe {
+        let codec =
+            ffmpeg_next::ffi::avcodec_find_decoder(ffmpeg_next::ffi::AVCodecID::AV_CODEC_ID_H264);
+        if codec.is_null() {
+            return false;
+        }
+        let mut index = 0;
+        loop {
+            let config = ffmpeg_next::ffi::avcodec_get_hw_config(codec, index);
+            if config.is_null() {
+                return false;
+            }
+            if (*config).pix_fmt == pixel_format {
+                return true;
+            }
+            index += 1;
+        }
     }
 }

@@ -10,11 +10,13 @@ report=${BENCHMARK_REPORT:-"$root_dir/benchmarks/video-$(date -u +%Y%m%d-%H%M%S)
 
 [[ -s "$input" ]] || { echo "error: missing video: $input" >&2; exit 2; }
 mkdir -p "$(dirname "$report")"
+probe="$root_dir/target/release/examples/video_probe"
+cargo build -q -p wallr-core --example video_probe --release
 
 run_probe() {
     local backend=$1
     TIMEFORMAT='wall_seconds=%R user_seconds=%U system_seconds=%S'
-    { time cargo run -q -p wallr-core --example video_probe --release -- "$input" "$backend"; } 2>&1
+    { time "$probe" "$input" "$backend"; } 2>&1
 }
 
 software=$(run_probe software)
@@ -25,17 +27,32 @@ frames=$(awk '/^decoded / {print $2; exit}' <<<"$software")
 vaapi_frames=$(awk '/^decoded / {print $2; exit}' <<<"$vaapi")
 nvdec_frames=$(awk '/^decoded / {print $2; exit}' <<<"$nvdec")
 software_rate=$(sed -n 's/^decoded .* (\([0-9.]*\) fps,.*/\1/p' <<<"$software" | head -n1)
-software_state=$(sed -n 's/^active backend: \([^ ]*\) (state:.*/\1/p' <<<"$software" | head -n1)
+software_backend=$(sed -n 's/^active backend: \([^ ]*\) (state:.*/\1/p' <<<"$software" | head -n1)
+software_state=$(sed -n 's/^active backend: .* (state: \([^,]*\),.*/\1/p' <<<"$software" | head -n1)
 vaapi_rate=$(sed -n 's/^decoded .* (\([0-9.]*\) fps,.*/\1/p' <<<"$vaapi" | head -n1)
-vaapi_state=$(sed -n 's/^active backend: \([^ ]*\) (state:.*/\1/p' <<<"$vaapi" | head -n1)
+vaapi_backend=$(sed -n 's/^active backend: \([^ ]*\) (state:.*/\1/p' <<<"$vaapi" | head -n1)
+vaapi_state=$(sed -n 's/^active backend: .* (state: \([^,]*\),.*/\1/p' <<<"$vaapi" | head -n1)
 nvdec_rate=$(sed -n 's/^decoded .* (\([0-9.]*\) fps,.*/\1/p' <<<"$nvdec" | head -n1)
-nvdec_state=$(sed -n 's/^active backend: \([^ ]*\) (state:.*/\1/p' <<<"$nvdec" | head -n1)
+nvdec_backend=$(sed -n 's/^active backend: \([^ ]*\) (state:.*/\1/p' <<<"$nvdec" | head -n1)
+nvdec_state=$(sed -n 's/^active backend: .* (state: \([^,]*\),.*/\1/p' <<<"$nvdec" | head -n1)
 software_drops=$(awk -F'dropped frames: ' '/^active backend:/ {gsub(/\).*/, "", $2); print $2; exit}' <<<"$software")
 vaapi_drops=$(awk -F'dropped frames: ' '/^active backend:/ {gsub(/\).*/, "", $2); print $2; exit}' <<<"$vaapi")
 nvdec_drops=$(awk -F'dropped frames: ' '/^active backend:/ {gsub(/\).*/, "", $2); print $2; exit}' <<<"$nvdec")
 software_cpu=$(awk -F'[ =]' '/^wall_seconds=/ {printf "%.3f", $4 + $6; exit}' <<<"$software")
 vaapi_cpu=$(awk -F'[ =]' '/^wall_seconds=/ {printf "%.3f", $4 + $6; exit}' <<<"$vaapi")
 nvdec_cpu=$(awk -F'[ =]' '/^wall_seconds=/ {printf "%.3f", $4 + $6; exit}' <<<"$nvdec")
+
+vaapi_reason=""
+if [[ $vaapi_backend != VAAPI ]] || ! grep -qx 'result: PASS' <<<"$vaapi"; then
+    vaapi_reason="requested VAAPI, active backend was ${vaapi_backend:-unavailable}"
+    vaapi_frames= vaapi_rate= vaapi_cpu= vaapi_drops=
+fi
+
+nvdec_reason=""
+if [[ $nvdec_backend != NVDEC ]] || ! grep -qx 'result: PASS' <<<"$nvdec"; then
+    nvdec_reason="requested NVDEC, active backend was ${nvdec_backend:-unavailable}"
+    nvdec_frames= nvdec_rate= nvdec_cpu= nvdec_drops=
+fi
 
 {
     echo "# Wallr video decoder benchmark"
@@ -52,6 +69,8 @@ nvdec_cpu=$(awk -F'[ =]' '/^wall_seconds=/ {printf "%.3f", $4 + $6; exit}' <<<"$
     printf '| Software | %s | %s | %s | %s | %s |\n' "${frames:-unavailable}" "${software_rate:-unavailable}" "${software_cpu:-unavailable}" "${software_state:-unavailable}" "${software_drops:-unavailable}"
     printf '| VAAPI | %s | %s | %s | %s | %s |\n' "${vaapi_frames:-unavailable}" "${vaapi_rate:-unavailable}" "${vaapi_cpu:-unavailable}" "${vaapi_state:-unavailable}" "${vaapi_drops:-unavailable}"
     printf '| NVDEC | %s | %s | %s | %s | %s |\n' "${nvdec_frames:-unavailable}" "${nvdec_rate:-unavailable}" "${nvdec_cpu:-unavailable}" "${nvdec_state:-unavailable}" "${nvdec_drops:-unavailable}"
+    [[ -z $vaapi_reason ]] || printf '\n- VAAPI unavailable: %s.\n' "$vaapi_reason"
+    [[ -z $nvdec_reason ]] || printf '\n- NVDEC unavailable: %s.\n' "$nvdec_reason"
 } >"$report"
 
 echo "Report saved to: $report"
