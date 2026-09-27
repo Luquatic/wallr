@@ -78,7 +78,7 @@ jobs:
         run: |
           mkdir -p "${{ github.workspace }}/.vcpkg-cache"
           /opt/vcpkg/vcpkg install \
-            'ffmpeg[core,avcodec,avformat,swscale,swresample]:x64-linux-static' \
+            'ffmpeg[core,avcodec,avformat,swscale,swresample,nvcodec]:x64-linux-static' \
             --overlay-triplets="$GITHUB_WORKSPACE/.github/vcpkg-triplets"
 
       - name: Install stable Rust
@@ -109,6 +109,17 @@ jobs:
           PKG_CONFIG_PATH: /opt/vcpkg/installed/x64-linux-static/lib/pkgconfig
           PKG_CONFIG_ALL_STATIC: "1"
         run: cargo build --release --bin wallr --features static-ffmpeg
+
+      - name: Verify static FFmpeg hardware support
+        env:
+          MEDIA_PREFIX: /opt/vcpkg/installed/x64-linux-static
+          PKG_CONFIG_PATH: /opt/vcpkg/installed/x64-linux-static/lib/pkgconfig
+          PKG_CONFIG_ALL_STATIC: "1"
+        run: |
+          set -euo pipefail
+          capabilities=$(cargo run -q -p wallr-core --example video_probe --release --features static-ffmpeg -- --capabilities)
+          printf '%s\n' "$capabilities"
+          grep -qx 'cuda: enabled' <<<"$capabilities"
 
       - name: Verify binary is self-contained
         run: |

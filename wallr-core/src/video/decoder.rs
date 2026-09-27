@@ -477,7 +477,8 @@ impl VideoDecoder {
     fn build_decoder(
         stream: &ffmpeg::format::stream::Stream,
         hw_accel: HwAccel,
-    ) -> (ffmpeg::codec::decoder::Video, HwAccel) {
+    ) -> (ffmpeg::codec::decoder::Video, HwAccel, DecoderState) {
+        let mut hardware_attempted = false;
         match hw_accel {
             HwAccel::Auto => {
                 // Probe only what this machine can actually use, in
@@ -488,8 +489,9 @@ impl VideoDecoder {
                 let mut tried = 0;
                 for backend in HwAccel::auto_hardware_order() {
                     tried += 1;
+                    hardware_attempted = true;
                     if let Some(result) = Self::try_hw_decoder(stream, backend) {
-                        return result;
+                        return (result.0, result.1, DecoderState::HardwareNegotiating);
                     }
                 }
                 if tried == 0 {
@@ -504,8 +506,9 @@ impl VideoDecoder {
             }
             specific => {
                 // Try the requested hardware backend first
+                hardware_attempted = true;
                 if let Some(result) = Self::try_hw_decoder(stream, specific) {
-                    return result;
+                    return (result.0, result.1, DecoderState::HardwareNegotiating);
                 }
                 // Fall back to software
                 tracing::info!(
@@ -519,7 +522,8 @@ impl VideoDecoder {
         let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .and_then(|ctx| ctx.decoder().video())
             .expect("software decoder must be available");
-        (decoder, HwAccel::Software)
+        let state = software_decoder_state(hardware_attempted);
+        (decoder, HwAccel::Software, state)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -549,16 +553,9 @@ impl VideoDecoder {
         let video_stream_index = stream.index();
         let time_base = stream.time_base();
 
-        let (mut decoder, used_hw) = Self::build_decoder(&stream, hw_accel);
+        let (mut decoder, used_hw, initial_state) = Self::build_decoder(&stream, hw_accel);
         tracing::info!("Decoder in use: {}", used_hw.name());
-        decoder_state.store(
-            if used_hw == HwAccel::Software {
-                DecoderState::SoftwareActive.code()
-            } else {
-                DecoderState::HardwareNegotiating.code()
-            },
-            Ordering::Release,
-        );
+        decoder_state.store(initial_state.code(), Ordering::Release);
 
         let mut scaler: Option<ffmpeg::software::scaling::Context> = None;
         let mut scaler_src: Option<ffmpeg::format::Pixel> = None;
@@ -942,6 +939,14 @@ fn ensure_ffmpeg_init() -> VideoResult<()> {
         .map(|_| ())
 }
 
+const fn software_decoder_state(hardware_attempted: bool) -> DecoderState {
+    if hardware_attempted {
+        DecoderState::SoftwareFallback
+    } else {
+        DecoderState::SoftwareActive
+    }
+}
+
 /// True when any `/sys/class/drm/card*` sibling reports NVIDIA vendor 0x10de.
 fn nvidia_gpu_present() -> bool {
     any_nvidia_card(std::path::Path::new("/sys/class/drm"))
@@ -1188,6 +1193,8 @@ mod tests {
             DecoderState::from_code(DecoderState::Failed.code()),
             DecoderState::Failed
         );
+        assert_eq!(software_decoder_state(true), DecoderState::SoftwareFallback);
+        assert_eq!(software_decoder_state(false), DecoderState::SoftwareActive);
     }
 
     #[test]

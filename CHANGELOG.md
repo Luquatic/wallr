@@ -25,6 +25,10 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Linux release binaries now include FFmpeg NVCodec support, so configured
+  NVDEC playback no longer silently falls back to CPU decoding.
+- Explicit hardware decode failures are reported as software fallback rather
+  than ordinary software decoding.
 - Fixed false hardware-decoding reports when a decoder opened but produced no
   hardware frames.
 - Fixed decoder shutdown caused by transient queue pressure.

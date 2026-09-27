@@ -11,6 +11,10 @@ use wallr_core::video::{HwAccel, VideoDecoder};
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("usage: video_probe <video> [backend]");
+    if path == "--capabilities" {
+        print_capabilities();
+        return;
+    }
     let backend = match args.next().as_deref() {
         Some("vaapi") => HwAccel::Vaapi,
         Some("nvdec") => HwAccel::Nvdec,
@@ -72,4 +76,19 @@ fn main() {
         decoder.dropped_frames()
     );
     println!("result: {}", if count > 30 { "PASS" } else { "FAIL" });
+}
+
+fn print_capabilities() {
+    for (name, backend) in [
+        ("cuda", "cuda"),
+        ("vaapi", "vaapi"),
+        ("videotoolbox", "videotoolbox"),
+    ] {
+        let backend = std::ffi::CString::new(backend).expect("static backend name");
+        let available = unsafe {
+            ffmpeg_next::ffi::av_hwdevice_find_type_by_name(backend.as_ptr())
+                != ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE
+        };
+        println!("{name}: {}", if available { "enabled" } else { "disabled" });
+    }
 }
