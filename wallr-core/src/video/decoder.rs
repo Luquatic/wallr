@@ -210,6 +210,7 @@ pub struct VideoDecoder {
     seek_epoch: Arc<AtomicU64>,
     hw_in_use: Arc<AtomicU8>,
     decoder_state: Arc<AtomicU8>,
+    fallback_occurred: Arc<AtomicBool>,
     decode_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -256,6 +257,8 @@ impl VideoDecoder {
         let hw_in_use_clone = hw_in_use.clone();
         let decoder_state = Arc::new(AtomicU8::new(DecoderState::Initializing.code()));
         let decoder_state_clone = decoder_state.clone();
+        let fallback_occurred = Arc::new(AtomicBool::new(false));
+        let fallback_clone = fallback_occurred.clone();
         let frame_queue_clone = frame_queue.clone();
         let dropped_frames_clone = dropped_frames.clone();
 
@@ -273,6 +276,7 @@ impl VideoDecoder {
                     seek_epoch_clone,
                     hw_in_use_clone.clone(),
                     decoder_state_clone.clone(),
+                    fallback_clone,
                     loop_video,
                 );
                 let used = match used {
@@ -298,6 +302,7 @@ impl VideoDecoder {
             seek_epoch,
             hw_in_use,
             decoder_state,
+            fallback_occurred,
             decode_thread: Some(decode_thread),
         })
     }
@@ -477,7 +482,8 @@ impl VideoDecoder {
     fn build_decoder(
         stream: &ffmpeg::format::stream::Stream,
         hw_accel: HwAccel,
-    ) -> (ffmpeg::codec::decoder::Video, HwAccel) {
+    ) -> (ffmpeg::codec::decoder::Video, HwAccel, DecoderState) {
+        let mut hardware_attempted = false;
         match hw_accel {
             HwAccel::Auto => {
                 // Probe only what this machine can actually use, in
@@ -488,8 +494,9 @@ impl VideoDecoder {
                 let mut tried = 0;
                 for backend in HwAccel::auto_hardware_order() {
                     tried += 1;
+                    hardware_attempted = true;
                     if let Some(result) = Self::try_hw_decoder(stream, backend) {
-                        return result;
+                        return (result.0, result.1, DecoderState::HardwareNegotiating);
                     }
                 }
                 if tried == 0 {
@@ -504,8 +511,9 @@ impl VideoDecoder {
             }
             specific => {
                 // Try the requested hardware backend first
+                hardware_attempted = true;
                 if let Some(result) = Self::try_hw_decoder(stream, specific) {
-                    return result;
+                    return (result.0, result.1, DecoderState::HardwareNegotiating);
                 }
                 // Fall back to software
                 tracing::info!(
@@ -519,7 +527,8 @@ impl VideoDecoder {
         let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
             .and_then(|ctx| ctx.decoder().video())
             .expect("software decoder must be available");
-        (decoder, HwAccel::Software)
+        let state = software_decoder_state(hardware_attempted);
+        (decoder, HwAccel::Software, state)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -534,6 +543,7 @@ impl VideoDecoder {
         seek_epoch: Arc<AtomicU64>,
         hw_in_use: Arc<AtomicU8>,
         decoder_state: Arc<AtomicU8>,
+        fallback_occurred: Arc<AtomicBool>,
         loop_video: bool,
     ) -> VideoResult<HwAccel> {
         let mut ictx = ffmpeg::format::input(&path).map_err(|e| VideoError::FileOpen {
@@ -549,14 +559,11 @@ impl VideoDecoder {
         let video_stream_index = stream.index();
         let time_base = stream.time_base();
 
-        let (mut decoder, used_hw) = Self::build_decoder(&stream, hw_accel);
+        let (mut decoder, used_hw, initial_state) = Self::build_decoder(&stream, hw_accel);
         tracing::info!("Decoder in use: {}", used_hw.name());
-        decoder_state.store(
-            if used_hw == HwAccel::Software {
-                DecoderState::SoftwareActive.code()
-            } else {
-                DecoderState::HardwareNegotiating.code()
-            },
+        decoder_state.store(initial_state.code(), Ordering::Release);
+        fallback_occurred.store(
+            initial_state == DecoderState::SoftwareFallback,
             Ordering::Release,
         );
 
@@ -688,9 +695,17 @@ impl VideoDecoder {
                         }
                         hardware_frame_seen = true;
                         hw_in_use.store(used_hw.code(), Ordering::Release);
-                        decoder_state.store(DecoderState::HardwareActive.code(), Ordering::Release);
+                        decoder_state
+                            .store(frame_decoder_state(used_hw, true).code(), Ordering::Release);
                         &sw_frame
                     } else {
+                        hw_in_use.store(HwAccel::Software.code(), Ordering::Release);
+                        // Preserve initialization fallback and remember any software
+                        // frames even if hardware decoding resumes later.
+                        decoder_state.store(
+                            observe_software_frame(used_hw, &fallback_occurred).code(),
+                            Ordering::Release,
+                        );
                         &decoded_frame
                     };
 
@@ -858,6 +873,11 @@ impl VideoDecoder {
         DecoderState::from_code(self.decoder_state.load(Ordering::Acquire))
     }
 
+    /// Whether this decoder has ever fallen back, including before recovery.
+    pub fn fallback_occurred(&self) -> bool {
+        self.fallback_occurred.load(Ordering::Acquire)
+    }
+
     pub fn is_video_file<P: AsRef<Path>>(path: P) -> bool {
         path.as_ref()
             .extension()
@@ -940,6 +960,31 @@ fn ensure_ffmpeg_init() -> VideoResult<()> {
         .as_ref()
         .map_err(|e| VideoError::SoftwareDecoderInit(anyhow::anyhow!(e.clone())))
         .map(|_| ())
+}
+
+const fn software_decoder_state(hardware_attempted: bool) -> DecoderState {
+    if hardware_attempted {
+        DecoderState::SoftwareFallback
+    } else {
+        DecoderState::SoftwareActive
+    }
+}
+
+const fn frame_decoder_state(selected_backend: HwAccel, hardware_frame: bool) -> DecoderState {
+    if hardware_frame {
+        DecoderState::HardwareActive
+    } else if matches!(selected_backend, HwAccel::Software) {
+        DecoderState::SoftwareActive
+    } else {
+        DecoderState::SoftwareFallback
+    }
+}
+
+fn observe_software_frame(selected_backend: HwAccel, fallback: &AtomicBool) -> DecoderState {
+    if selected_backend != HwAccel::Software {
+        fallback.store(true, Ordering::Release);
+    }
+    software_decoder_state(fallback.load(Ordering::Acquire))
 }
 
 /// True when any `/sys/class/drm/card*` sibling reports NVIDIA vendor 0x10de.
@@ -1187,6 +1232,47 @@ mod tests {
         assert_eq!(
             DecoderState::from_code(DecoderState::Failed.code()),
             DecoderState::Failed
+        );
+        assert_eq!(software_decoder_state(true), DecoderState::SoftwareFallback);
+        assert_eq!(software_decoder_state(false), DecoderState::SoftwareActive);
+    }
+
+    #[test]
+    fn software_frame_from_hardware_decoder_reports_fallback() {
+        assert_eq!(
+            frame_decoder_state(HwAccel::Nvdec, false),
+            DecoderState::SoftwareFallback
+        );
+        assert_eq!(
+            frame_decoder_state(HwAccel::Nvdec, true),
+            DecoderState::HardwareActive
+        );
+        assert_eq!(
+            frame_decoder_state(HwAccel::Software, false),
+            DecoderState::SoftwareActive
+        );
+    }
+
+    #[test]
+    fn fallback_history_survives_recovery_and_software_frames() {
+        let fallback = AtomicBool::new(false);
+        assert_eq!(
+            observe_software_frame(HwAccel::Software, &fallback),
+            DecoderState::SoftwareActive
+        );
+        assert!(!fallback.load(Ordering::Acquire));
+        assert_eq!(
+            observe_software_frame(HwAccel::Nvdec, &fallback),
+            DecoderState::SoftwareFallback
+        );
+        assert_eq!(
+            frame_decoder_state(HwAccel::Nvdec, true),
+            DecoderState::HardwareActive
+        );
+        assert!(fallback.load(Ordering::Acquire));
+        assert_eq!(
+            observe_software_frame(HwAccel::Software, &fallback),
+            DecoderState::SoftwareFallback
         );
     }
 
