@@ -75,6 +75,7 @@ fn main() {
         decoder.decoder_state().name(),
         decoder.dropped_frames()
     );
+    println!("fallback occurred: {}", decoder.fallback_occurred());
     println!("result: {}", if count > 30 { "PASS" } else { "FAIL" });
 }
 

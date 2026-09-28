@@ -19,7 +19,11 @@ run_probe() {
     { time "$probe" "$input" "$backend"; } 2>&1
 }
 
-software=$(run_probe software)
+software=$(run_probe software) || { printf '%s\n' "$software" >&2; exit 1; }
+if ! grep -qx 'result: PASS' <<<"$software"; then
+    printf 'error: software probe failed; no benchmark report generated\n%s\n' "$software" >&2
+    exit 1
+fi
 vaapi=$(run_probe vaapi || true)
 nvdec=$(run_probe nvdec || true)
 
@@ -27,7 +31,6 @@ frames=$(awk '/^decoded / {print $2; exit}' <<<"$software")
 vaapi_frames=$(awk '/^decoded / {print $2; exit}' <<<"$vaapi")
 nvdec_frames=$(awk '/^decoded / {print $2; exit}' <<<"$nvdec")
 software_rate=$(sed -n 's/^decoded .* (\([0-9.]*\) fps,.*/\1/p' <<<"$software" | head -n1)
-software_backend=$(sed -n 's/^active backend: \([^ ]*\) (state:.*/\1/p' <<<"$software" | head -n1)
 software_state=$(sed -n 's/^active backend: .* (state: \([^,]*\),.*/\1/p' <<<"$software" | head -n1)
 vaapi_rate=$(sed -n 's/^decoded .* (\([0-9.]*\) fps,.*/\1/p' <<<"$vaapi" | head -n1)
 vaapi_backend=$(sed -n 's/^active backend: \([^ ]*\) (state:.*/\1/p' <<<"$vaapi" | head -n1)
@@ -43,14 +46,14 @@ vaapi_cpu=$(awk -F'[ =]' '/^wall_seconds=/ {printf "%.3f", $4 + $6; exit}' <<<"$
 nvdec_cpu=$(awk -F'[ =]' '/^wall_seconds=/ {printf "%.3f", $4 + $6; exit}' <<<"$nvdec")
 
 vaapi_reason=""
-if [[ $vaapi_backend != VAAPI ]] || ! grep -qx 'result: PASS' <<<"$vaapi"; then
-    vaapi_reason="requested VAAPI, active backend was ${vaapi_backend:-unavailable}"
+if [[ $vaapi_backend != VAAPI || $vaapi_state != 'hardware active' ]] || ! grep -qx 'result: PASS' <<<"$vaapi" || ! grep -qx 'fallback occurred: false' <<<"$vaapi"; then
+    vaapi_reason="probe failed, fell back, or did not remain hardware active (backend: ${vaapi_backend:-unavailable}, state: ${vaapi_state:-unavailable})"
     vaapi_frames= vaapi_rate= vaapi_cpu= vaapi_drops=
 fi
 
 nvdec_reason=""
-if [[ $nvdec_backend != NVDEC ]] || ! grep -qx 'result: PASS' <<<"$nvdec"; then
-    nvdec_reason="requested NVDEC, active backend was ${nvdec_backend:-unavailable}"
+if [[ $nvdec_backend != NVDEC || $nvdec_state != 'hardware active' ]] || ! grep -qx 'result: PASS' <<<"$nvdec" || ! grep -qx 'fallback occurred: false' <<<"$nvdec"; then
+    nvdec_reason="probe failed, fell back, or did not remain hardware active (backend: ${nvdec_backend:-unavailable}, state: ${nvdec_state:-unavailable})"
     nvdec_frames= nvdec_rate= nvdec_cpu= nvdec_drops=
 fi
 
