@@ -24,6 +24,8 @@ Wallr renders its own background surface on `wlr-layer-shell` compositors. It do
 ## Features
 
 - Static, GIF, and video wallpapers (MP4, WebM, MKV) with hardware-accelerated decode
+-  (NVDEC on NVIDIA, VAAPI elsewhere; official Linux release binaries include
+  FFmpeg NVCodec support)
 - 6 transitions: fade, wipe, slide, wave, grow, outer
 - Per-monitor wallpapers and scaling modes
 - Background daemon over a Unix socket
@@ -106,7 +108,7 @@ Full schema: [`docs/config-reference.md`](docs/config-reference.md).
 |---|---|
 | Compositor | Hyprland, Sway, niri (layer rule required), or KDE Plasma 6: any `wlr-layer-shell` implementation. GNOME/Mutter is unsupported. |
 | Rust | stable, for building from source |
-| FFmpeg | required only when building from source, for video wallpapers. Prebuilt release binaries statically link FFmpeg. |
+| FFmpeg | required only when building from source, for video wallpapers. Prebuilt release binaries statically link FFmpeg, including NVDEC support. |
 
 ## Building from source
 

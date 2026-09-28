@@ -5,6 +5,35 @@ All notable changes to Wallr are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-09-28
+
+### Added
+
+- `wallr-core` ships a `video_probe` example. `--capabilities` reports whether
+  the linked FFmpeg exposes CUDA (NVDEC), VAAPI, and VideoToolbox, so a build
+  can be checked without a Wayland session or a GPU.
+- Release builds now verify static FFmpeg hardware support and fail the job when
+  CUDA is missing, so a release can no longer ship without NVDEC.
+
+### Fixed
+
+- Linux release binaries now include FFmpeg NVCodec support, so configured
+  NVDEC playback no longer silently falls back to CPU decoding.
+- Explicit hardware decode failures are reported as software fallback
+  immediately at initialization instead of waiting for the first frame to reveal
+  the downgrade.
+- A decoder that has fallen back to software keeps reporting a fallback even
+  after hardware decoding recovers, so `wallr ipc info` no longer hides the
+  downgrade on streams that alternate between backends.
+- The video benchmark harness and `video_probe` now reject runs whose decoder
+  failed or that mixed hardware and software backends, instead of reporting a
+  partial run as a hardware result.
+
+### Documentation
+
+- Documented that official Linux release binaries include FFmpeg NVCodec
+  support, and that NVDEC still loads the installed NVIDIA driver at runtime.
+
 ## [0.6.2] - 2026-09-24
 
 ### Changed
@@ -25,10 +54,6 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Linux release binaries now include FFmpeg NVCodec support, so configured
-  NVDEC playback no longer silently falls back to CPU decoding.
-- Explicit hardware decode failures are reported as software fallback rather
-  than ordinary software decoding.
 - Fixed false hardware-decoding reports when a decoder opened but produced no
   hardware frames.
 - Fixed decoder shutdown caused by transient queue pressure.
